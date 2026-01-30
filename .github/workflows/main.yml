@@ -1,0 +1,117 @@
+name: SCA Benchmark – Snyk + Semgrep + Trivy + OSV
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan_repo:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        repo:
+          - ErqiFang/benchmark-java-maven
+          - ErqiFang/benchmark-python-pip
+          - ErqiFang/benchmark-node-npm
+
+    steps:
+      - name: Install tools (pinned versions)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq git curl unzip openjdk-17-jdk nodejs npm golang python3-pip
+
+          pip3 install semgrep==1.45.0
+          npm install -g snyk@1.1290.0
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/v0.48.3/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+          go install github.com/google/osv-scanner/cmd/osv-scanner@v1.7.0
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Clone repo (public, reproducible)
+        run: git clone https://github.com/${{ matrix.repo }} project
+
+      # ---------------- SCA ----------------
+
+      - name: Snyk
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_SECRET }}
+        run: |
+          mkdir -p results
+          snyk test --all-projects --json > results/sca_raw.json || true
+          jq '{vulnerabilities: (.vulnerabilities // [])}' results/sca_raw.json > results/sca_cleaned.json
+
+      - name: Semgrep
+        run: |
+          mkdir -p results
+          semgrep --config p/security-audit --json > results/semgrep.json || echo '{"results":[]}' > results/semgrep.json
+
+      # ---------------- SBOM + VULNS ----------------
+
+      - name: Trivy
+        run: |
+          mkdir -p results
+          trivy fs project \
+            --scanners vuln,license \
+            --format json \
+            --output results/sbom_vuln.json || echo '{"Results":[]}' > results/sbom_vuln.json
+
+      - name: Generate SBOM
+        run: |
+          trivy fs project --format cyclonedx --output results/sbom.cdx.json || \
+            echo '{"bomFormat":"CycloneDX","components":[]}' > results/sbom.cdx.json
+
+      - name: OSV
+        run: |
+          osv-scanner -r project --format json \
+            > results/osv-scan.json || echo '{"results":[]}' > results/osv-scan.json
+
+      # ---------------- MERGE COUNTS ----------------
+
+      - name: Merge SBOM counts
+        run: |
+          jq -r '.Results[].Vulnerabilities[]? | .PkgName + ":" + .VulnID' results/sbom_vuln.json > trivy.txt || true
+          jq -r '.results[].packages[]? | .package.name + ":" + .vulnerabilities[]?.id' results/osv-scan.json > osv.txt || true
+
+          L=$(cat trivy.txt osv.txt | sort -u | wc -l)
+          echo "$L,0,0,0" > results/sbom_counts.txt
+          echo "generated" > results/sbom_status.txt
+
+      - name: Set artifact name
+        id: set_artifact
+        run: |
+          echo "artifact_name=$(echo ${{ matrix.repo }} | tr '/' '_')" >> $GITHUB_OUTPUT
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.set_artifact.outputs.artifact_name }}
+          path: results
+
+  summarize:
+    needs: scan_repo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: all_results
+
+      - name: Build summary.csv
+        run: |
+          echo "repo,sca,semgrep,sbom,total" > summary.csv
+          for d in all_results/*; do
+            R=$(basename "$d"); R=${R//_//}
+            SCA=$(jq '.vulnerabilities | length' "$d/sca_cleaned.json" 2>/dev/null || echo 0)
+            SEM=$(jq '.results | length' "$d/semgrep.json" 2>/dev/null || echo 0)
+            SB=$(cut -d',' -f1 "$d/sbom_counts.txt" 2>/dev/null || echo 0)
+            TOTAL=$((SCA+SEM+SB))
+            echo "$R,$SCA,$SEM,$SB,$TOTAL" >> summary.csv
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-summary
+          path: summary.csv
