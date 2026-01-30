@@ -51,7 +51,13 @@ jobs:
 
 
       - name: Clone repo
-        run: git clone --depth 1 https://github.com/${{ matrix.repo }} project
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repo }}
+          path: project
+          fetch-depth: 1
+          persist-credentials: false
+
 
       - name: Best-effort dependency install
         run: |
