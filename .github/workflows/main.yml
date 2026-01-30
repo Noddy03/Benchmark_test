@@ -16,7 +16,7 @@ jobs:
     steps:
       - id: set
         run: |
-          echo 'repos=["OWASP-Benchmark/BenchmarkJava","snyk/vuln-demo-app","snyk/vuln-demo-python","snyk/vuln-demo-go","juice-shop/juice-shop"]' >> $GITHUB_OUTPUT
+          echo 'repos=["OWASP-Benchmark/BenchmarkJava","snyk/vuln-demo-node","snyk/vuln-demo-python-3","snyk/vuln-demo-go","bkimminich/juice-shop"]' >> $GITHUB_OUTPUT
 
   scan_repo:
     needs: fetch_repos
