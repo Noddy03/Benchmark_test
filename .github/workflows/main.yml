@@ -20,19 +20,24 @@ jobs:
           - ErqiFang/benchmark-node-npm
 
     steps:
+      - name: Clone repo (public, no credentials)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repo }}
+          path: project
+          persist-credentials: false
+          fetch-depth: 1
+
       - name: Install tools (pinned versions)
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq git curl unzip openjdk-17-jdk nodejs npm golang python3-pip
+          sudo apt-get install -y jq curl unzip openjdk-17-jdk nodejs npm golang python3-pip
 
           pip3 install semgrep==1.45.0
           npm install -g snyk@1.1290.0
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/v0.48.3/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
           go install github.com/google/osv-scanner/cmd/osv-scanner@v1.7.0
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
-
-      - name: Clone repo (public, reproducible)
-        run: git clone https://github.com/${{ matrix.repo }} project
 
       # ---------------- SCA ----------------
 
@@ -76,8 +81,8 @@ jobs:
           jq -r '.Results[].Vulnerabilities[]? | .PkgName + ":" + .VulnID' results/sbom_vuln.json > trivy.txt || true
           jq -r '.results[].packages[]? | .package.name + ":" + .vulnerabilities[]?.id' results/osv-scan.json > osv.txt || true
 
-          L=$(cat trivy.txt osv.txt | sort -u | wc -l)
-          echo "$L,0,0,0" > results/sbom_counts.txt
+          TOTAL=$(cat trivy.txt osv.txt | sort -u | wc -l)
+          echo "$TOTAL,0,0,0" > results/sbom_counts.txt
           echo "generated" > results/sbom_status.txt
 
       - name: Set artifact name
