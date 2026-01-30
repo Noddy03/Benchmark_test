@@ -2,7 +2,6 @@ name: Security Scan – Snyk + Semgrep + Trivy SBOM + OSV-Scanner + Licenses
 
 on:
   workflow_dispatch:
-   
 
 permissions:
   contents: read
@@ -16,165 +15,73 @@ jobs:
     steps:
       - id: set
         run: |
-          echo 'repos=["OWASP-Benchmark/BenchmarkJava","bkimminich/juice-shop","snyk/vuln-demo","snyk/vuln-demo-python","google/go-github"]' >> $GITHUB_OUTPUT
-  
+          echo 'repos=["OWASP-Benchmark/BenchmarkJava","bkimminich/juice-shop","google/go-github"]' >> $GITHUB_OUTPUT
 
   scan_repo:
     needs: fetch_repos
-    if: ${{ needs.fetch_repos.outputs.repos != '[]' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
         repo: ${{ fromJSON(needs.fetch_repos.outputs.repos) }}
-    
+
     steps:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq git curl unzip openjdk-17-jdk maven gradle nodejs npm golang
-          pip3 install --upgrade pip
+          sudo apt-get install -y jq git curl unzip openjdk-17-jdk maven nodejs npm golang
           pip3 install semgrep
           npm install -g snyk
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
-          # Install OSV-Scanner
           go install github.com/google/osv-scanner/cmd/osv-scanner@v1.9.0
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
-      - name: Hard reset git credentials
-        run: |
-          rm -f ~/.gitconfig
-          rm -f ~/.config/git/config
-          git config --global --unset-all credential.helper || true
-          git config --global --unset-all http.https://github.com/.extraheader || true
-          git config --global --unset-all http.https://github.com/.header || true
-
-
-      - name: Clone repo
+      - name: Checkout target repo (FIXED)
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo }}
           path: project
           fetch-depth: 1
+          token: ${{ github.token }}
 
       - name: Best-effort dependency install
         run: |
           cd project
           if [ -f pom.xml ]; then mvn -B dependency:resolve || true; fi
-          if [ -f build.gradle ]; then ./gradlew build || true; fi
+          if [ -f package.json ]; then npm install || true; fi
           if [ -f requirements.txt ]; then pip3 install -r requirements.txt || true; fi
-          if [ -f pyproject.toml ]; then pip3 install . || true; fi
 
-      - name: SCA - Snyk (optimised)
+      - name: Snyk
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_SECRET }}
-          SNYK_CFG_ENABLE_EXPERIMENTAL_ECOSYSTEMS: "1"
         run: |
-          mkdir -p results      
-          if [ -f project/pom.xml ]; then
-            mvn -f project/pom.xml dependency:resolve || echo "Maven resolution failed"
-          fi
-          snyk test --all-projects --scan-unmanaged --detection-depth=50 --json --skip-unresolved > results/sca_raw.json || echo "Snyk scan completed with issues"
-          jq 'if type=="array" then map(.vulnerabilities // []) | add else .vulnerabilities // [] end | { vulnerabilities: . }' results/sca_raw.json > results/sca.json || echo '{"vulnerabilities":[]}' > results/sca.json
-                jq '
-          {
-            vulnerabilities:
-              .vulnerabilities
-              | map(
-                  select(
-                    ((.ignored // .isIgnored // false) | not)
-                  )
-                  | {
-                      id: (.id // .title),
-                      severity: (.severity // "unknown"),
-                      package: (.packageName // .name // "unknown"),
-                      version: (.version // "unknown"),
-                      isPatched: (.isPatched // .patched // false),
-                      title: .title,
-                      url: .url
-                    }
-                )
-              | unique_by(.package + ":" + .version + ":" + .id)
-          }
-          ' results/sca.json > results/sca_cleaned.json
+          mkdir -p results
+          snyk test --all-projects --json > results/sca.json || true
+
       - name: Semgrep
         run: |
           mkdir -p results
-          semgrep --config p/security-audit --config p/owasp-top-ten --config p/java --config p/python --config p/javascript --json > results/semgrep.json || echo '{"results":[]}' > results/semgrep.json
+          semgrep --config p/security-audit --json > results/semgrep.json || true
 
-       # ---------------- SBOM + Trivy + OSV ----------------
-      - name: Trivy vulnerabilities + licenses
-        run: |
-          set -e
-          mkdir -p results     
-          # Main Trivy output (MATCHES downstream expectations)
-          trivy fs project \
-            --scanners vuln,license \
-            --format json \
-            --output results/sbom_vuln.json || echo '{"Results":[]}' > results/sbom_vuln.json      
-          # Vulnerability summary
-          jq '[.Results[].Vulnerabilities[]?]
-              | unique_by(.PkgName + .Severity + (.VulnID // ""))
-              | group_by(.Severity)
-              | map({(.[0].Severity): length})
-              | add' results/sbom_vuln.json \
-              > results/vuln_summary.json || echo '{}' > results/vuln_summary.json     
-          # License summary (MATCHES summary job)
-          jq '[.Results[].Licenses[]?]
-              | group_by(.License)
-              | map({(.[0].License): length})
-              | add' results/sbom_vuln.json \
-              > results/licenses_tmp.json || echo '{}' > results/licenses_tmp.json
-      - name: Generate SBOM (compliance only)
+      - name: Trivy + SBOM
         run: |
           mkdir -p results
-          trivy fs project --format cyclonedx --output results/sbom.cdx.json || \
-            echo '{"bomFormat":"CycloneDX","components":[]}' > results/sbom.cdx.json
-      
-      - name: OSV scan
+          trivy fs project --format json --output results/sbom_vuln.json || true
+          trivy fs project --format cyclonedx --output results/sbom.cdx.json || true
+
+      - name: OSV
         run: |
           mkdir -p results
-          osv-scanner -r project --format json \
-            > results/osv-scan.json || echo '{"results":[]}' > results/osv-scan.json
-        
-      - name: Merge SBOM counts
-        run: |
-            mkdir -p results    
-            # 1. Extract Unique IDs from Trivy by severity
-            # We create a simple text file for each severity containing the VulnIDs
-            jq -r '.Results[].Vulnerabilities[]? | select(.Severity=="LOW") | .PkgName + ":" + .VulnID' results/sbom_vuln.json > trivy_ids_low.txt || touch trivy_ids_low.txt
-            jq -r '.Results[].Vulnerabilities[]? | select(.Severity=="MEDIUM") | .PkgName + ":" + .VulnID' results/sbom_vuln.json > trivy_ids_med.txt || touch trivy_ids_med.txt
-            jq -r '.Results[].Vulnerabilities[]? | select(.Severity=="HIGH") | .PkgName + ":" + .VulnID' results/sbom_vuln.json > trivy_ids_high.txt || touch trivy_ids_high.txt
-            jq -r '.Results[].Vulnerabilities[]? | select(.Severity=="CRITICAL") | .PkgName + ":" + .VulnID' results/sbom_vuln.json > trivy_ids_crit.txt || touch trivy_ids_crit.txt
-            # 2. Extract Unique IDs from OSV-Scanner by severity
-            # Mapping OSV's nested structure to match the "Package:ID" format
-            jq -r '.results[].packages[]? | .package.name as $pkg | .vulnerabilities[]? | select(.database_specific.severity=="LOW") | $pkg + ":" + .id' results/osv-scan.json > osv_ids_low.txt || touch osv_ids_low.txt
-            jq -r '.results[].packages[]? | .package.name as $pkg | .vulnerabilities[]? | select(.database_specific.severity=="MEDIUM") | $pkg + ":" + .id' results/osv-scan.json > osv_ids_med.txt || touch osv_ids_med.txt
-            jq -r '.results[].packages[]? | .package.name as $pkg | .vulnerabilities[]? | select(.database_specific.severity=="HIGH") | $pkg + ":" + .id' results/osv-scan.json > osv_ids_high.txt || touch osv_ids_high.txt
-            jq -r '.results[].packages[]? | .package.name as $pkg | .vulnerabilities[]? | select(.database_specific.severity=="CRITICAL") | $pkg + ":" + .id' results/osv-scan.json > osv_ids_crit.txt || touch osv_ids_crit.txt 
-            # 3. Merge, Sort, and De-duplicate
-            # 'sort -u' combines the lists and removes any ID found by both tools
-            COMBINED_L=$(cat trivy_ids_low.txt osv_ids_low.txt | sort -u | wc -l)
-            COMBINED_M=$(cat trivy_ids_med.txt osv_ids_med.txt | sort -u | wc -l)
-            COMBINED_H=$(cat trivy_ids_high.txt osv_ids_high.txt | sort -u | wc -l)
-            COMBINED_C=$(cat trivy_ids_crit.txt osv_ids_crit.txt | sort -u | wc -l) 
-            # 4. Save final de-duplicated counts
-            echo "$COMBINED_L,$COMBINED_M,$COMBINED_H,$COMBINED_C" > results/sbom_counts.txt
-            echo "generated" > results/sbom_status.txt
-            
-      - name: Set artifact name
-        id: set_artifact
-        run: |
-          ARTIFACT_NAME=$(echo "${{ matrix.repo }}" | sed 's#[/:]#_#g')_$(date +%s)
-          echo "artifact_name=$ARTIFACT_NAME" >> $GITHUB_OUTPUT
+          osv-scanner -r project --format json > results/osv.json || true
+
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.set_artifact.outputs.artifact_name }}
+          name: ${{ matrix.repo }}
           path: results
 
-  summarize:
+  benchmark_score:
     needs: scan_repo
     runs-on: ubuntu-latest
     steps:
@@ -182,80 +89,39 @@ jobs:
         with:
           path: all_results
 
-      - name: Build summary.csv
+      - name: Ground truth
         run: |
-          echo "repo,sca_low,sca_medium,sca_high,sca_critical,semgrep_low,semgrep_medium,semgrep_high,semgrep_critical,sbom_low,sbom_medium,sbom_high,sbom_critical,sbom_status,total" > summary.csv      
-          for d in all_results/*; do
-            R=$(basename "$d"); R=${R//_//}
-            SCAL=$(jq '[.vulnerabilities[]? | select((.severity // "") | ascii_downcase == "low")] | length' "$d/sca_cleaned.json" 2>/dev/null || echo 0)
-            SCAM=$(jq '[.vulnerabilities[]? | select((.severity // "") | ascii_downcase == "medium")] | length' "$d/sca_cleaned.json" 2>/dev/null || echo 0)
-            SCAH=$(jq '[.vulnerabilities[]? | select((.severity // "") | ascii_downcase == "high")] | length' "$d/sca_cleaned.json" 2>/dev/null || echo 0)
-            SCAC=$(jq '[.vulnerabilities[]? | select((.severity // "") | ascii_downcase == "critical")] | length' "$d/sca_cleaned.json" 2>/dev/null || echo 0)
-            SEM_L=$(jq '[.results[]? | select(.extra.severity=="INFO")] | length' "$d/semgrep.json" 2>/dev/null || echo 0)
-            SEM_M=$(jq '[.results[]? | select(.extra.severity=="WARNING")] | length' "$d/semgrep.json" 2>/dev/null || echo 0)
-            SEM_H=$(jq '[.results[]? | select(.extra.severity=="ERROR")] | length' "$d/semgrep.json" 2>/dev/null || echo 0)
-            SEM_C=$(jq '[.results[]? | select(.extra.severity=="ERROR" and (.extra.metadata.confidence // "")=="HIGH")] | length' "$d/semgrep.json" 2>/dev/null || echo 0)
-            if [ -f "$d/sbom_counts.txt" ]; then IFS=',' read SB_L SB_M SB_H SB_C < "$d/sbom_counts.txt"; else SB_L=0; SB_M=0; SB_H=0; SB_C=0; fi 
-            STATUS=$(cat "$d/sbom_status.txt" 2>/dev/null || echo "generated")
-            TOTAL=$((SCAL+SCAM+SCAH+SCAC+SEM_L+SEM_M+SEM_H+SEM_C+SB_L+SB_M+SB_H+SB_C))      
-            echo "$R,$SCAL,$SCAM,$SCAH,$SCAC,$SEM_L,$SEM_M,$SEM_H,$SEM_C,$SB_L,$SB_M,$SB_H,$SB_C,$STATUS,$TOTAL" >> summary.csv
-          done
-      - name: Build summary_licenses.csv
+          cat <<EOF > ground_truth.csv
+          repo,expected
+          OWASP-Benchmark/BenchmarkJava,274
+          bkimminich/juice-shop,30
+          google/go-github,5
+          EOF
+
+      - name: Compute recall
         run: |
-          echo "repo,license_name,count" > summary_licenses.csv
-          for d in all_results/*; do
-            R=$(basename "$d"); R=${R//_//}
-            if [ -f "$d/licenses_tmp.json" ]; then
-              jq -r 'to_entries[] | [.key, .value] | @csv' "$d/licenses_tmp.json" 2>/dev/null | \
-              while IFS=',' read -r license count; do
-                license=$(echo $license | tr -d '"')
-                echo "$R,$license,$count" >> summary_licenses.csv
-              done
-            fi
-          done
-      - uses: actions/upload-artifact@v4
-        with:
-          name: security-summary
-          path: summary.csv
+          python3 <<'EOF'
+          import pandas as pd, glob, json
+          rows=[]
+          for d in glob.glob("all_results/*"):
+              repo=d.split("/")[-1]
+              total=0
+              try:
+                  with open(f"{d}/sbom_vuln.json") as f:
+                      data=json.load(f)
+                      for r in data.get("Results",[]):
+                          total+=len(r.get("Vulnerabilities",[]))
+              except: pass
+              rows.append([repo,total])
+          df=pd.DataFrame(rows,columns=["repo","total"])
+          gt=pd.read_csv("ground_truth.csv")
+          m=gt.merge(df,on="repo")
+          m["recall"]=(m["total"]/m["expected"]).round(3)
+          print(m)
+          m.to_csv("benchmark_results.csv",index=False)
+          EOF
 
       - uses: actions/upload-artifact@v4
         with:
-          name: licenses-summary
-          path: summary_licenses.csv
-
-  benchmark_score:
-        needs: summarize
-        runs-on: ubuntu-latest
-        steps:
-          - uses: actions/download-artifact@v4
-            with:
-              name: security-summary
-    
-          - name: Load ground truth
-            run: |
-              cat <<'EOF' > ground_truth.csv
-              repo,expected
-              OWASP-Benchmark/BenchmarkJava,274
-              snyk/vuln-demo-app,15
-              snyk/vuln-demo-python,8
-              snyk/vuln-demo-go,6
-              juice-shop/juice-shop,30
-              EOF
-    
-          - name: Compute recall
-            run: |
-              python3 <<'EOF'
-              import pandas as pd
-              df = pd.read_csv("summary.csv")
-              gt = pd.read_csv("ground_truth.csv")
-              merged = gt.merge(df, on="repo")
-              merged["recall"] = (merged["total"] / merged["expected"]).round(3)
-              print("\n=== SCA BENCHMARK RESULTS ===\n")
-              print(merged[["repo","expected","total","recall"]])
-              merged.to_csv("benchmark_results.csv", index=False)
-              EOF
-    
-          - uses: actions/upload-artifact@v4
-            with:
-              name: benchmark-results
-              path: benchmark_results.csv
+          name: benchmark-results
+          path: benchmark_results.csv
