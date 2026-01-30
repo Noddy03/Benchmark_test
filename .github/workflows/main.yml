@@ -40,6 +40,12 @@ jobs:
           # Install OSV-Scanner
           go install github.com/google/osv-scanner/cmd/osv-scanner@v1.9.0
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Reset git auth
+        run: |
+          git config --global --unset-all http.https://github.com/.extraheader || true
+          git config --global --unset-all http.https://github.com/.header || true
+
       - name: Clone repo
         run: git clone --depth 1 https://github.com/${{ matrix.repo }} project
 
