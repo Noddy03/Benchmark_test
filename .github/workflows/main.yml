@@ -20,11 +20,16 @@ jobs:
           - ErqiFang/benchmark-node-npm
 
     steps:
-      - name: Clone repo (public)
+
+
+      - name: Clone repo (public, no auth, no prompts)
+        env:
+          GIT_TERMINAL_PROMPT: 0
+          GIT_ASKPASS: /bin/true
         run: |
           git config --global --unset-all http.https://github.com/.extraheader || true
-          git clone https://github.com/${{ matrix.repo }} project
-
+          git config --global --unset-all credential.helper || true
+          git clone --depth 1 https://github.com/${{ matrix.repo }} project
 
 
       - name: Install tools (pinned versions)
