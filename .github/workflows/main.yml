@@ -2,15 +2,7 @@ name: Security Scan – Snyk + Semgrep + Trivy SBOM + OSV-Scanner + Licenses
 
 on:
   workflow_dispatch:
-    inputs:
-      language:
-        description: 'Choose language to scan'
-        required: true
-        default: 'Java'
-      top_n:
-        description: 'Number of repositories to scan'
-        required: false
-        default: '5'
+   
 
 permissions:
   contents: read
@@ -53,21 +45,14 @@ jobs:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: git clone --depth 1 https://x-access-token:${TOKEN}@github.com/${{ matrix.repo }} project
 
-      - name: Install Java dependencies
-        if: ${{ inputs.language == 'Java' }}
+      - name: Best-effort dependency install
         run: |
           cd project
           if [ -f pom.xml ]; then mvn -B dependency:resolve || true; fi
           if [ -f build.gradle ]; then ./gradlew build || true; fi
-      - name: Python deps (best effort)
-        if: ${{ inputs.language == 'Python' }}
-        run: |
-          cd project
-          python3 -m venv .venv
-          source .venv/bin/activate
-          pip install --upgrade pip setuptools wheel
-          if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
-          if [ -f pyproject.toml ]; then pip install . || true; fi
+          if [ -f requirements.txt ]; then pip3 install -r requirements.txt || true; fi
+          if [ -f pyproject.toml ]; then pip3 install . || true; fi
+
       - name: SCA - Snyk (optimised)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_SECRET }}
@@ -103,8 +88,8 @@ jobs:
       - name: Semgrep
         run: |
           mkdir -p results
-          LANG_LOWER=$(echo "${{ inputs.language }}" | tr '[:upper:]' '[:lower:]')
-          semgrep --config p/security-audit --config p/owasp-top-ten --config p/$LANG_LOWER --json > results/semgrep.json || echo '{"results":[]}' > results/semgrep.json
+          semgrep --config p/security-audit --config p/owasp-top-ten --config p/java --config p/python --config p/javascript --json > results/semgrep.json || echo '{"results":[]}' > results/semgrep.json
+
        # ---------------- SBOM + Trivy + OSV ----------------
       - name: Trivy vulnerabilities + licenses
         run: |
