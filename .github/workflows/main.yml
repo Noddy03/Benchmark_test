@@ -41,7 +41,7 @@ jobs:
           go install github.com/google/osv-scanner/cmd/osv-scanner@v1.9.0
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
-       - name: Hard reset git credentials
+      - name: Hard reset git credentials
         run: |
           rm -f ~/.gitconfig
           rm -f ~/.config/git/config
