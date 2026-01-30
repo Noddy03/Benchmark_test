@@ -37,7 +37,7 @@ jobs:
           go install github.com/google/osv-scanner/cmd/osv-scanner@v1.9.0
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
-      - name: Checkout target repo (FIXED)
+      - name: Checkout target repo
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo }}
@@ -75,10 +75,16 @@ jobs:
           mkdir -p results
           osv-scanner -r project --format json > results/osv.json || true
 
+      - name: Set artifact name
+        id: name
+        run: |
+          SAFE=$(echo "${{ matrix.repo }}" | tr '/' '_')
+          echo "artifact_name=$SAFE" >> $GITHUB_OUTPUT
+
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.repo }}
+          name: ${{ steps.name.outputs.artifact_name }}
           path: results
 
   benchmark_score:
@@ -93,9 +99,9 @@ jobs:
         run: |
           cat <<EOF > ground_truth.csv
           repo,expected
-          OWASP-Benchmark/BenchmarkJava,274
-          bkimminich/juice-shop,30
-          google/go-github,5
+          OWASP-Benchmark_BenchmarkJava,274
+          bkimminich_juice-shop,30
+          google_go-github,5
           EOF
 
       - name: Compute recall
@@ -117,6 +123,7 @@ jobs:
           gt=pd.read_csv("ground_truth.csv")
           m=gt.merge(df,on="repo")
           m["recall"]=(m["total"]/m["expected"]).round(3)
+          print("\n=== BENCHMARK RESULTS ===\n")
           print(m)
           m.to_csv("benchmark_results.csv",index=False)
           EOF
