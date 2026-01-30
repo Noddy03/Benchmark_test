@@ -10,13 +10,19 @@ permissions:
 
 jobs:
   fetch_repos:
-    runs-on: ubuntu-latest
-    outputs:
-      repos: ${{ steps.set.outputs.repos }}
-    steps:
-      - id: set
-        run: |
-          echo 'repos=["OWASP-Benchmark/BenchmarkJava","snyk/vuln-demo-node","snyk/vuln-demo-python-3","snyk/vuln-demo-go","bkimminich/juice-shop"]' >> $GITHUB_OUTPUT
+      runs-on: ubuntu-latest
+      outputs:
+        repos: ${{ steps.set.outputs.repos }}
+      steps:
+        - id: set
+          run: |
+            echo 'repos=[
+              "OWASP-Benchmark/BenchmarkJava",
+              "bkimminich/juice-shop",
+              "snyk/vuln-demo",
+              "snyk/vuln-demo-python",
+              "google/go-github"
+            ]' >> $GITHUB_OUTPUT
 
   scan_repo:
     needs: fetch_repos
@@ -56,8 +62,6 @@ jobs:
           repository: ${{ matrix.repo }}
           path: project
           fetch-depth: 1
-          persist-credentials: false
-
 
       - name: Best-effort dependency install
         run: |
