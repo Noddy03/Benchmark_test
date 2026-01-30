@@ -20,14 +20,11 @@ jobs:
           - ErqiFang/benchmark-node-npm
 
     steps:
-      - name: Clone repo (public, reproducible)
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ matrix.repo }}
-          path: project
-          token: ${{ github.token }}
-          persist-credentials: false
-          fetch-depth: 1
+      - name: Clone repo (public)
+        run: |
+          git config --global --unset-all http.https://github.com/.extraheader || true
+          git clone https://github.com/${{ matrix.repo }} project
+
 
 
       - name: Install tools (pinned versions)
